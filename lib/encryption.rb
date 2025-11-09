@@ -9,10 +9,11 @@ module DokSnap
   class Encryption
     attr_reader :method
     
-    def initialize(method:, public_key: nil, password: nil)
+    def initialize(method:, public_key: nil, password: nil, key_id: nil)
       @method = method
       @public_key = public_key
       @password = password
+      @key_id = key_id  # Optional explicit key ID/fingerprint
     end
 
     def encrypt(input_path, output_path)
@@ -43,8 +44,21 @@ module DokSnap
         raise 'No GPG public keys found. Please import a public key.'
       end
 
-      # Use specific key ID instead of first key
-      key_id = keys.first.fingerprint
+      # Use explicit key ID if provided, otherwise use first key
+      if @key_id
+        # Validate that the specified key exists
+        matching_key = keys.find { |k| k.fingerprint == @key_id || k.keyid == @key_id }
+        unless matching_key
+          raise "Specified GPG key ID not found: #{@key_id}. Available keys: #{keys.map(&:fingerprint).join(', ')}"
+        end
+        key_id = matching_key.fingerprint
+      else
+        # Use first key but validate it's valid
+        key_id = keys.first.fingerprint
+        if keys.length > 1
+          $stderr.puts "Warning: Multiple GPG keys found. Using #{key_id}. Specify key_id in config to use a specific key."
+        end
+      end
 
       File.open(input_path, 'rb') do |input|
         File.open(output_path, 'wb') do |output|
@@ -75,10 +89,10 @@ module DokSnap
       cipher = OpenSSL::Cipher.new('AES-256-CBC')
       cipher.encrypt
       
-      # Derive key from password using PBKDF2 with higher iterations
+      # Derive key from password using PBKDF2 with SHA256 (not SHA1)
       salt = OpenSSL::Random.random_bytes(16)
-      # Increased from 20,000 to 100,000 iterations
-      key = OpenSSL::PKCS5.pbkdf2_hmac_sha1(@password, salt, 100_000, cipher.key_len)
+      # Use SHA256 instead of SHA1, with 100,000 iterations
+      key = OpenSSL::PKCS5.pbkdf2_hmac_sha256(@password, salt, 100_000, cipher.key_len)
       iv = cipher.random_iv
       
       cipher.key = key

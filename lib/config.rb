@@ -6,6 +6,8 @@ require 'rufus-scheduler'
 
 module DokSnap
   class Config
+    MAX_CONFIG_SIZE = 1 * 1024 * 1024  # 1MB limit for config file
+    
     attr_reader :s3, :encryption, :apps, :status_server
 
     def initialize(config_path = 'config.yaml')
@@ -19,6 +21,12 @@ module DokSnap
     def load_config
       unless File.exist?(@config_path)
         raise "Configuration file not found: #{@config_path}"
+      end
+
+      # Check config file size to prevent memory exhaustion
+      config_size = File.size(@config_path)
+      if config_size > MAX_CONFIG_SIZE
+        raise "Configuration file too large: #{config_size} bytes. Maximum allowed: #{MAX_CONFIG_SIZE} bytes (1MB)"
       end
 
       raw_config = YAML.safe_load(File.read(@config_path))
@@ -36,8 +44,21 @@ module DokSnap
         raise "Invalid S3 bucket name: #{bucket}. Must be 3-63 characters, lowercase alphanumeric."
       end
       
+      endpoint = raw['endpoint'] || 's3.amazonaws.com'
+      
+      # Validate endpoint format (must be valid hostname or domain)
+      # Allow hostname format: alphanumeric, dots, dashes
+      unless endpoint == 's3.amazonaws.com' || endpoint.match?(/\A[a-zA-Z0-9][a-zA-Z0-9\.\-]*[a-zA-Z0-9]\z/)
+        raise "Invalid S3 endpoint format: #{endpoint}. Must be a valid hostname."
+      end
+      
+      # Prevent malicious endpoint injection (no protocols, ports, paths)
+      if endpoint.include?('://') || endpoint.include?(':') || endpoint.include?('/')
+        raise "Invalid S3 endpoint: #{endpoint}. Endpoint must be a hostname only (no protocol, port, or path)."
+      end
+      
       OpenStruct.new(
-        endpoint: raw['endpoint'] || 's3.amazonaws.com',
+        endpoint: endpoint,
         bucket: bucket,
         region: raw['region'] || 'us-east-1',
         access_key_id: ENV['AWS_ACCESS_KEY_ID'] || raise('AWS_ACCESS_KEY_ID environment variable is required'),
@@ -51,7 +72,8 @@ module DokSnap
       case method
       when 'gpg'
         public_key = ENV['GPG_PUBLIC_KEY'] || raise('GPG_PUBLIC_KEY environment variable is required for GPG encryption')
-        OpenStruct.new(method: 'gpg', public_key: public_key)
+        key_id = raw['key_id'] || ENV['GPG_KEY_ID'] || nil  # Optional explicit key ID
+        OpenStruct.new(method: 'gpg', public_key: public_key, key_id: key_id)
       when 'aes256'
         password = ENV['ENCRYPTION_PASSWORD'] || raise('ENCRYPTION_PASSWORD environment variable is required for AES-256 encryption')
         OpenStruct.new(method: 'aes256', password: password)
@@ -74,12 +96,36 @@ module DokSnap
     end
 
     def parse_retention_config(raw)
+      # Validate retention values
+      keep_last = validate_retention_value(raw['keep_last'], 'keep_last', 1, 1000)
+      daily = validate_retention_value(raw['daily'], 'daily', 1, 365)
+      weekly = validate_retention_value(raw['weekly'], 'weekly', 1, 104)  # ~2 years
+      monthly = validate_retention_value(raw['monthly'], 'monthly', 1, 120)  # 10 years
+      
       OpenStruct.new(
-        keep_last: raw['keep_last'],
-        daily: raw['daily'],
-        weekly: raw['weekly'],
-        monthly: raw['monthly']
+        keep_last: keep_last,
+        daily: daily,
+        weekly: weekly,
+        monthly: monthly
       )
+    end
+
+    def validate_retention_value(value, name, min, max)
+      return nil if value.nil?
+      
+      # Must be an integer
+      unless value.is_a?(Integer) || (value.is_a?(String) && value.match?(/\A\d+\z/))
+        raise "Invalid retention value for #{name}: must be an integer"
+      end
+      
+      int_value = value.to_i
+      
+      # Must be positive and within bounds
+      if int_value < min || int_value > max
+        raise "Invalid retention value for #{name}: must be between #{min} and #{max}, got #{int_value}"
+      end
+      
+      int_value
     end
 
     def parse_hooks_config(raw)

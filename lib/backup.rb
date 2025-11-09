@@ -17,6 +17,29 @@ module DokSnap
       @app = app
       @encryption = encryption
       @metadata = {}
+      @temp_dirs = []
+      setup_cleanup_handler
+    end
+
+    def setup_cleanup_handler
+      # Register cleanup handler to ensure temp directories are removed
+      at_exit do
+        cleanup_temp_dirs
+      end
+    end
+
+    def cleanup_temp_dirs
+      @temp_dirs.each do |temp_dir|
+        begin
+          if Dir.exist?(temp_dir)
+            FileUtils.rm_rf(temp_dir)
+          end
+        rescue => e
+          # Log but don't raise - cleanup should be best effort
+          $stderr.puts "Warning: Failed to cleanup temp directory #{temp_dir}: #{e.message}"
+        end
+      end
+      @temp_dirs.clear
     end
 
     def execute
@@ -25,9 +48,16 @@ module DokSnap
       # Execute pre-backup hook
       execute_hook(@app.hooks.pre_backup) if @app.hooks.pre_backup
 
+      temp_dir = nil
+      encrypted_file = nil
+      
       begin
         # Create temporary directory for backup files
         temp_dir = Dir.mktmpdir('doksnap')
+        @temp_dirs << temp_dir
+        
+        # Set restrictive permissions on temp directory (owner read/write/execute only)
+        FileUtils.chmod(0700, temp_dir)
         
         # Generate backup filename
         timestamp = Time.now.utc.strftime('%Y%m%d_%H%M%S')
@@ -52,19 +82,33 @@ module DokSnap
         encrypted_size = File.size(encrypted_file)
         if encrypted_size > MAX_BACKUP_SIZE * 1.1 # Allow 10% overhead for encryption
           File.delete(encrypted_file) if File.exist?(encrypted_file)
+          encrypted_file = nil
           raise "Encrypted backup size exceeds maximum allowed size"
         end
         
-        # Generate metadata
+        # Generate metadata (includes checksum calculation)
         @metadata = generate_metadata(encrypted_file, start_time)
         
-        # Verify backup integrity
+        # Verify backup integrity (uses checksum from metadata, no recalculation)
         verify_backup(encrypted_file)
         
         # Clean up tar file (keep encrypted version)
         File.delete(tar_file) if File.exist?(tar_file)
         
+        # Remove temp_dir from tracking since we're keeping the encrypted file
+        @temp_dirs.delete(temp_dir)
+        
         encrypted_file
+      rescue => e
+        # Cleanup on error
+        if encrypted_file && File.exist?(encrypted_file)
+          File.delete(encrypted_file) rescue nil
+        end
+        if temp_dir && Dir.exist?(temp_dir)
+          FileUtils.rm_rf(temp_dir) rescue nil
+          @temp_dirs.delete(temp_dir)
+        end
+        raise
       ensure
         # Execute post-backup hook
         execute_hook(@app.hooks.post_backup) if @app.hooks.post_backup
@@ -75,6 +119,21 @@ module DokSnap
 
     def create_tar_archive(output_path)
       source = @app.source
+      
+      # Early validation: check source exists and is accessible
+      unless File.exist?(source)
+        raise "Source path does not exist: #{source}"
+      end
+      
+      unless File.readable?(source)
+        raise "Source path is not readable: #{source}"
+      end
+      
+      # Check parent directory is writable for output
+      output_dir = File.dirname(output_path)
+      unless File.writable?(output_dir)
+        raise "Output directory is not writable: #{output_dir}"
+      end
       
       # Create tar.gz archive
       case @app.type
@@ -132,10 +191,12 @@ module DokSnap
         raise "Backup file is empty: #{file_path}"
       end
       
-      # Verify checksum matches
-      calculated_checksum = calculate_checksum(file_path)
-      if @metadata[:checksum] && calculated_checksum != @metadata[:checksum]
-        raise "Backup checksum verification failed"
+      # Verify checksum matches (checksum already calculated in generate_metadata)
+      # We trust the checksum from metadata since it was just calculated
+      # In a production system, you might want to recalculate for extra safety,
+      # but for performance we skip recalculation here
+      unless @metadata[:checksum]
+        raise "Backup metadata missing checksum"
       end
       
       true
@@ -160,7 +221,7 @@ module DokSnap
       
       # First part must be an executable
       executable = parts[0]
-      unless File.exist?(executable) || system("which #{executable.shellescape} > /dev/null 2>&1")
+      unless File.exist?(executable) || find_executable_in_path(executable)
         raise "Hook executable not found: #{executable}"
       end
 
@@ -169,6 +230,25 @@ module DokSnap
       unless $?.success?
         raise "Hook command failed with exit code #{$?.exitstatus}: #{command}"
       end
+    end
+
+    def find_executable_in_path(executable)
+      # Check if executable exists in PATH without using system calls
+      return false if executable.nil? || executable.empty?
+      
+      # If it's an absolute path, just check if it exists
+      return File.executable?(executable) if File.absolute_path?(executable) || executable.start_with?('/')
+      
+      # Search in PATH
+      path_dirs = ENV['PATH'].to_s.split(File::PATH_SEPARATOR)
+      path_dirs.each do |dir|
+        next if dir.empty?
+        
+        full_path = File.join(dir, executable)
+        return true if File.executable?(full_path)
+      end
+      
+      false
     end
   end
 

@@ -22,6 +22,9 @@ module DokSnap
       puts "Starting DokSnapShotter backup daemon..."
       puts "Loaded #{@config.apps.length} app(s) for backup"
       
+      # Check file descriptor limits
+      check_file_descriptor_limits
+      
       # Start status server if enabled
       if @config.status_server.enabled
         start_status_server
@@ -48,7 +51,8 @@ module DokSnap
       when 'gpg'
         Encryption.new(
           method: 'gpg',
-          public_key: @config.encryption.public_key
+          public_key: @config.encryption.public_key,
+          key_id: @config.encryption.key_id
         )
       when 'aes256'
         Encryption.new(
@@ -99,6 +103,27 @@ module DokSnap
       Signal.trap('TERM') do
         stop
         exit 0
+      end
+    end
+
+    def check_file_descriptor_limits
+      begin
+        # Get current soft and hard limits
+        soft_limit, hard_limit = Process.getrlimit(Process::RLIMIT_NOFILE)
+        
+        # Warn if soft limit is too low (less than 1024)
+        if soft_limit < 1024
+          $stderr.puts "Warning: File descriptor soft limit is #{soft_limit} (recommended: >= 1024)"
+          $stderr.puts "Consider increasing with: ulimit -n 1024"
+        end
+        
+        # Warn if approaching hard limit (within 20%)
+        if soft_limit < hard_limit * 0.8
+          $stderr.puts "Warning: File descriptor soft limit (#{soft_limit}) is less than 80% of hard limit (#{hard_limit})"
+        end
+      rescue => e
+        # Silently fail on systems where this isn't supported
+        # (e.g., Windows or systems without getrlimit)
       end
     end
   end

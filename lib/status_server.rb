@@ -2,11 +2,20 @@
 
 require 'sinatra/base'
 require 'json'
+require 'rack/utils'
 
 module DokSnap
   class StatusServer < Sinatra::Base
     set :bind, '0.0.0.0'
     set :port, 4567
+    set :max_request_size, 1024 * 1024  # 1MB max request body size
+    
+    # Reject oversized requests
+    before do
+      if request.content_length && request.content_length > settings.max_request_size
+        halt 413, { error: 'Request entity too large. Maximum size: 1MB' }.to_json
+      end
+    end
 
     def self.set_dependencies(scheduler, s3_uploader, apps, config)
       @@scheduler = scheduler
@@ -21,31 +30,38 @@ module DokSnap
         api_key = request.env['HTTP_X_API_KEY'] || params['api_key']
         expected_key = @@config.status_server.api_key
         
-        unless expected_key && api_key == expected_key
+        # Use constant-time comparison to prevent timing attacks
+        unless expected_key && api_key && Rack::Utils.secure_compare(api_key.to_s, expected_key.to_s)
+          # Log failed authentication attempt (rate limited to prevent log flooding)
+          log_failed_auth(request.ip) if @@config.status_server.require_auth
           halt 401, { error: 'Unauthorized. Provide X-API-Key header or api_key parameter.' }.to_json
         end
       end
     end
 
-    # Rate limiting (simple in-memory)
+    # Rate limiting (simple in-memory) - applies regardless of auth status
     @@rate_limit = {}
+    @@auth_failures = {}  # Track failed auth attempts for logging
+    
     before do
-      if @@config.status_server.require_auth
-        client_ip = request.ip
-        now = Time.now.to_i
-        
-        # Clean old entries
-        @@rate_limit.delete_if { |_, data| data[:time] < now - 60 }
-        
-        # Check rate limit (60 requests per minute per IP)
-        if @@rate_limit[client_ip]
-          if @@rate_limit[client_ip][:count] >= 60
-            halt 429, { error: 'Rate limit exceeded. Max 60 requests per minute.' }.to_json
-          end
-          @@rate_limit[client_ip][:count] += 1
-        else
-          @@rate_limit[client_ip] = { count: 1, time: now }
+      client_ip = request.ip
+      now = Time.now.to_i
+      
+      # Clean old entries
+      @@rate_limit.delete_if { |_, data| data[:time] < now - 60 }
+      @@auth_failures.delete_if { |_, data| data[:time] < now - 300 }  # Clean after 5 minutes
+      
+      # Apply rate limiting regardless of auth status
+      # More restrictive for unauthenticated requests
+      limit = @@config.status_server.require_auth ? 60 : 30  # 60/min with auth, 30/min without
+      
+      if @@rate_limit[client_ip]
+        if @@rate_limit[client_ip][:count] >= limit
+          halt 429, { error: "Rate limit exceeded. Max #{limit} requests per minute." }.to_json
         end
+        @@rate_limit[client_ip][:count] += 1
+      else
+        @@rate_limit[client_ip] = { count: 1, time: now }
       end
     end
 
@@ -54,12 +70,14 @@ module DokSnap
       headers 'X-Content-Type-Options' => 'nosniff'
       headers 'X-Frame-Options' => 'DENY'
       headers 'X-XSS-Protection' => '1; mode=block'
+      headers 'Content-Security-Policy' => "default-src 'self'; script-src 'none'; style-src 'none'; img-src 'none'; connect-src 'self'"
       headers 'Strict-Transport-Security' => 'max-age=31536000; includeSubDomains' if request.scheme == 'https'
     end
 
     get '/health' do
       content_type :json
-      { status: 'healthy', timestamp: Time.now.utc.iso8601 }.to_json
+      # Minimal information - just status, no timestamp to reduce information disclosure
+      { status: 'healthy' }.to_json
     end
 
     get '/status' do
@@ -200,6 +218,18 @@ module DokSnap
       
       durations = successful.map { |j| j[:metadata][:duration_seconds] }
       (durations.sum.to_f / durations.length).round(2)
+    end
+
+    def log_failed_auth(ip)
+      now = Time.now.to_i
+      
+      # Rate limit logging to prevent log flooding (max 1 log per 5 minutes per IP)
+      if @@auth_failures[ip]
+        return if @@auth_failures[ip][:time] > now - 300  # Already logged in last 5 minutes
+      end
+      
+      @@auth_failures[ip] = { time: now }
+      $stderr.puts "[SECURITY] Failed authentication attempt from #{ip} at #{Time.now.utc.iso8601}"
     end
   end
 end

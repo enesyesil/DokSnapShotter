@@ -7,4 +7,5 @@ gem 'sinatra', '~> 3.0'
 gem 'rufus-scheduler', '~> 3.9'
 gem 'gpgme', '~> 2.0'
 gem 'rubyzip', '~> 2.3'
+gem 'tzinfo', '~> 2.0'
 
