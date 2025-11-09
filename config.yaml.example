@@ -1,0 +1,42 @@
+s3:
+  endpoint: s3.amazonaws.com
+  bucket: my-backups
+  region: us-east-1
+  # Credentials from environment: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+
+encryption:
+  method: gpg  # or aes256
+  # GPG: GPG_PUBLIC_KEY environment variable required
+  # AES-256: ENCRYPTION_PASSWORD environment variable required
+
+status_server:
+  enabled: true
+  port: 4567
+  bind: 0.0.0.0
+  require_auth: false  # Set to true and provide DOKSNAP_API_KEY for production/exposed servers
+  # api_key: optional-inline-key (not recommended, use DOKSNAP_API_KEY env var instead)
+
+apps:
+  - name: myapp
+    type: volume  # or directory
+    source: /var/lib/docker/volumes/myapp_data
+    schedule: "0 2 * * *"  # Daily at 2 AM (cron format)
+    retention:
+      keep_last: 7          # Always keep the last 7 backups
+      daily: 7              # Keep daily backups for 7 days
+      weekly: 4             # Keep weekly backups for 4 weeks
+      monthly: 12           # Keep monthly backups for 12 months
+    hooks:
+      pre_backup: "docker stop myapp"    # Optional: stop app before backup
+      post_backup: "docker start myapp"  # Optional: start app after backup
+
+  - name: myapp2
+    type: directory
+    source: /data/myapp2
+    schedule: "0 3 * * *"  # Daily at 3 AM
+    retention:
+      keep_last: 5
+      daily: 14
+      weekly: 8
+      monthly: 6
+

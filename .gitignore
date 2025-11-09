@@ -1,0 +1,35 @@
+# Dependencies
+vendor/
+.bundle/
+
+# Environment
+.env
+.env.local
+
+# Config
+config.yaml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+*.tmp
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.tar.gz
+*.tar.gz.gpg
+*.tar.gz.enc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+

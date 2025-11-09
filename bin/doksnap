@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../lib/doksnap'
+
+# Parse command line arguments
+config_path = ARGV[0] || 'config.yaml'
+
+begin
+  app = DokSnap::Application.new(config_path)
+  app.start
+rescue => e
+  puts "Error: #{e.message}"
+  puts e.backtrace.join("\n") if ENV['DEBUG']
+  exit 1
+end
+
